@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import * as cheerio from "cheerio";
-import { Document, VectorStoreIndex, Settings } from "llamaindex";
+import { Document, VectorStoreIndex, Settings, storageContextFromDefaults } from "llamaindex";
 import { Gemini, GEMINI_MODEL } from "@llamaindex/google";
 import {
     HuggingFaceEmbedding,
@@ -10,6 +10,7 @@ import {
 } from "@llamaindex/huggingface";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs/promises";
 
 
 Settings.llm = new Gemini({ model: GEMINI_MODEL.GEMINI_2_5_FLASH_LATEST });
@@ -21,6 +22,7 @@ const BASE_URL = "https://handbook.gitlab.com";
 const START_URL = "https://handbook.gitlab.com/handbook/";
 const MAX_PAGES = 120;
 const visited = new Set<string>();
+const CACHE_DIR = path.join(process.cwd(), ".cache", "handbook-index");
 
 function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -55,9 +57,31 @@ export type ProgressEvent =
     | { type: "indexing" }
     | { type: "ready" };
 
+let lastProgressEvent: ProgressEvent | null = null;
+
 function broadcast(event: ProgressEvent) {
+    lastProgressEvent = event;
     const data = `data: ${JSON.stringify(event)}\n\n`;
     sseClients.forEach((client) => client.res.write(data));
+}
+
+async function cacheExists() {
+    try {
+        await fs.access(CACHE_DIR);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function loadCachedQueryEngine() {
+    if (!(await cacheExists())) return null;
+
+    const storageContext = await storageContextFromDefaults({
+        persistDir: CACHE_DIR,
+    });
+    const index = await VectorStoreIndex.init({ storageContext });
+    return index.asQueryEngine({ similarityTopK: 6 });
 }
 
 // ── Crawler ──────────────────────────────────────────────
@@ -123,6 +147,8 @@ app.get("/progress", (req, res) => {
     // If already ready, immediately tell this client
     if (ready) {
         res.write(`data: ${JSON.stringify({ type: "ready" })}\n\n`);
+    } else if (lastProgressEvent) {
+        res.write(`data: ${JSON.stringify(lastProgressEvent)}\n\n`);
     }
 
     req.on("close", () => {
@@ -164,6 +190,15 @@ async function init() {
         console.log(`[server] http://localhost:${PORT}`);
     });
 
+    const cachedQueryEngine = await loadCachedQueryEngine();
+    if (cachedQueryEngine) {
+        queryEngine = cachedQueryEngine;
+        ready = true;
+        broadcast({ type: "ready" });
+        console.log("[server] ✓ Loaded cached index");
+        return;
+    }
+
     console.log("[server] Crawling handbook...");
     const documents = await crawl();
     console.log(`[server] Crawled ${documents.length} pages`);
@@ -173,6 +208,7 @@ async function init() {
 
     broadcast({ type: "indexing" });
     const index = await VectorStoreIndex.fromDocuments(documents);
+    await index.storageContext.persist(CACHE_DIR);
     queryEngine = index.asQueryEngine({ similarityTopK: 6 });
 
     ready = true;
