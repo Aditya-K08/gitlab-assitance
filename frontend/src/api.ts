@@ -1,4 +1,4 @@
-const BASE = "";
+const BASE = "https://gitlab-assitance.onrender.com";
 
 export async function sendMessage(message: string): Promise<string> {
     const res = await fetch(`${BASE}/chat`, {
