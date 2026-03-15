@@ -35,7 +35,7 @@ export function subscribeToProgress(
     onEvent: (e: ProgressEvent) => void,
     onReady: () => void
 ): () => void {
-    const es = new EventSource("/progress");
+    const es = new EventSource(`${BASE}/progress`);
 
     es.onmessage = (msg) => {
         try {
